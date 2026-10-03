@@ -1,0 +1,20 @@
+[Unit]
+Description=Okdesk: заполнение атрибута «Телефон» из контакта заявки
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/okdesk-phone-sync
+ExecStart=/opt/okdesk-phone-sync/okdesk-phone-sync -config /opt/okdesk-phone-sync/config.toml
+Restart=on-failure
+RestartSec=10
+User=okdesk-phone-sync
+Group=okdesk-phone-sync
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
