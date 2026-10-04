@@ -4,12 +4,14 @@
 // значения атрибута обратно в заявку.
 //
 // Клиент не логирует api_token: в журнал попадает только метод и путь запроса,
-// а тело ответа при ошибке очищается от значения токена.
+// а значение токена маскируется в теле ответа и в тексте транспортных ошибок.
 package okdesk
 
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -360,7 +362,7 @@ func (c *Client) attempt(ctx context.Context, method, path string, query url.Val
 
 	req, err := http.NewRequestWithContext(ctx, method, target, reader)
 	if err != nil {
-		return nil, false, fmt.Errorf("okdesk: создание запроса %s: %w", path, err)
+		return nil, false, fmt.Errorf("okdesk: создание запроса %s: %w", path, c.redactError(err))
 	}
 	req.Header.Set("Accept", "application/json")
 	if encoded != nil {
@@ -371,7 +373,10 @@ func (c *Client) attempt(ctx context.Context, method, path string, query url.Val
 
 	resp, err := c.http.Do(req)
 	if err != nil {
-		return nil, true, fmt.Errorf("okdesk: запрос %s %s: %w", method, path, err)
+		// Транспортная ошибка net/http содержит полный URL с api_token, поэтому
+		// её текст маскируется. Ошибки проверки TLS не повторяем: сертификат не
+		// станет доверенным от повторной попытки.
+		return nil, !isTLSError(err), fmt.Errorf("okdesk: запрос %s %s: %w", method, path, c.redactError(err))
 	}
 	defer resp.Body.Close()
 
@@ -418,6 +423,57 @@ func (c *Client) redact(s string) string {
 		return s
 	}
 	return strings.ReplaceAll(s, c.apiToken, "***")
+}
+
+// redactError оборачивает ошибку, маскируя значение api_token в её тексте.
+// Транспортные ошибки net/http содержат полный URL запроса вместе с токеном,
+// поэтому их текст нельзя писать в журнал как есть. Исходная ошибка сохраняется
+// для errors.Is/errors.As.
+func (c *Client) redactError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return &redactedError{msg: c.redact(err.Error()), err: err}
+}
+
+// redactedError — ошибка с маскированным текстом и сохранённой причиной.
+type redactedError struct {
+	msg string
+	err error
+}
+
+func (e *redactedError) Error() string { return e.msg }
+
+func (e *redactedError) Unwrap() error { return e.err }
+
+// isTLSError сообщает, что ошибка вызвана проблемой TLS или сертификата и повтор
+// запроса не поможет.
+func isTLSError(err error) bool {
+	var certErr *tls.CertificateVerificationError
+	if errors.As(err, &certErr) {
+		return true
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	if errors.As(err, &unknownAuthority) {
+		return true
+	}
+	var hostnameErr x509.HostnameError
+	if errors.As(err, &hostnameErr) {
+		return true
+	}
+	var certInvalidErr x509.CertificateInvalidError
+	if errors.As(err, &certInvalidErr) {
+		return true
+	}
+	var systemRootsErr x509.SystemRootsError
+	if errors.As(err, &systemRootsErr) {
+		return true
+	}
+	var recordHeaderErr tls.RecordHeaderError
+	if errors.As(err, &recordHeaderErr) {
+		return true
+	}
+	return false
 }
 
 // APIError описывает неуспешный ответ Okdesk.

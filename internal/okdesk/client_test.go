@@ -2,8 +2,10 @@ package okdesk
 
 import (
 	"context"
+	"crypto/x509"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -28,6 +30,73 @@ func newTestClient(t *testing.T, srv *httptest.Server) *Client {
 		t.Fatalf("New: %v", err)
 	}
 	return c
+}
+
+// errorTransport — http.RoundTripper, всегда возвращающий заданную ошибку и
+// считающий число попыток.
+type errorTransport struct {
+	err   error
+	calls *int32
+}
+
+func (t errorTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	if t.calls != nil {
+		atomic.AddInt32(t.calls, 1)
+	}
+	return nil, t.err
+}
+
+func TestRequestTransportErrorRedactsToken(t *testing.T) {
+	const token = "super-secret-token"
+	// net/http включает полный URL с api_token в текст транспортной ошибки.
+	leaky := fmt.Errorf("Get %q: dial tcp: connection refused",
+		"https://okdesk.example/api/v1/issues/list?api_token="+token)
+
+	c, err := New(Config{
+		BaseURL:        "https://okdesk.example",
+		APIToken:       token,
+		HTTPClient:     &http.Client{Transport: errorTransport{err: leaky}},
+		MaxAttempts:    1,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	_, err = c.ListIssueParameters(context.Background())
+	if err == nil {
+		t.Fatal("ожидалась ошибка")
+	}
+	msg := err.Error()
+	if strings.Contains(msg, token) {
+		t.Fatalf("токен утёк в текст ошибки: %q", msg)
+	}
+	if !strings.Contains(msg, "***") {
+		t.Fatalf("ожидалась маскировка токена: %q", msg)
+	}
+}
+
+func TestRequestDoesNotRetryOnTLSError(t *testing.T) {
+	var calls int32
+	c, err := New(Config{
+		BaseURL:        "https://okdesk.example",
+		APIToken:       "secret-token",
+		HTTPClient:     &http.Client{Transport: errorTransport{err: x509.UnknownAuthorityError{}, calls: &calls}},
+		MaxAttempts:    4,
+		InitialBackoff: time.Millisecond,
+		MaxBackoff:     time.Millisecond,
+	})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	if _, err := c.ListIssueParameters(context.Background()); err == nil {
+		t.Fatal("ожидалась ошибка")
+	}
+	if got := atomic.LoadInt32(&calls); got != 1 {
+		t.Fatalf("попыток = %d, ожидалась 1 (TLS-ошибка не повторяется)", got)
+	}
 }
 
 func TestListIssueParameters(t *testing.T) {

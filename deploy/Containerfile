@@ -1,0 +1,26 @@
+# Образ для запуска сервиса okdesk-phone-sync.
+#
+# Первый этап нужен только для получения корневых сертификатов: базовый образ
+# scratch их не содержит, из-за чего HTTPS-запросы к Okdesk падают с ошибкой
+# "x509: certificate signed by unknown authority".
+FROM alpine:3.20 AS certs
+RUN apk add --no-cache ca-certificates
+
+FROM scratch
+
+# Корневые сертификаты для проверки TLS-сертификата Okdesk.
+COPY --from=certs /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+ENV SSL_CERT_FILE=/etc/ssl/certs/ca-certificates.crt
+
+# Бинарник собирается заранее статически: make build (CGO_ENABLED=0).
+COPY okdesk-phone-sync /
+
+# ВНИМАНИЕ: config.toml содержит секрет (api_token). Копирование запекает его в
+# слой образа, откуда его можно извлечь. Для эксплуатации надёжнее монтировать
+# конфиг только для чтения при запуске:
+#   podman run --rm -v /etc/okdesk-phone-sync/config.toml:/config.toml:ro,Z \
+#     okdesk-phone-sync:latest
+# COPY оставлен для локальных проверок; в продакшене его лучше убрать.
+COPY config.toml /
+
+ENTRYPOINT ["/okdesk-phone-sync", "-config", "/config.toml"]
